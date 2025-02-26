@@ -1,6 +1,7 @@
 import numpy as np
 import cupy as cp
 import tqdm
+import os
 from scipy.optimize import curve_fit, minimize, OptimizeWarning
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -283,7 +284,6 @@ class TireDrive:
     
     # NumPy version for curve_fit
     def pacejka_formula_numpy(self, X, B, C, D, E, V):
-        import numpy as np
         Fz, slip = X
         return Fz*D*np.sin(C*np.arctan(B*slip-E*(B*slip-np.arctan(B*slip)))) + V
         
@@ -348,7 +348,6 @@ class TireDrive:
         Fx = self.Fx_data.get()
 
         # Use NumPy for mesh creation
-        import numpy as np
         Fz_mesh, slip_mesh = np.meshgrid(
             np.linspace(Fz.min(), Fz.max(), 50),
             np.linspace(slip.min(), slip.max(), 50)
@@ -663,7 +662,7 @@ class Track:
     def __init__(self, scale=100, track_name="figure8", load_from_cache=True):
         self.scale = scale
         self.track_width = 10  # meters
-        self.resolution = 1000  # points to define track
+        self.resolution = 100  # points to define track
         self.track_name = track_name
         
         # CSV filenames for caching
@@ -911,10 +910,6 @@ class Track:
         tolerance = 0.1
         max_iterations = 10
         
-        # Define these constants if not already in the global scope
-        rho = 1.225  # air density (kg/m^3)
-        g = 9.81     # gravity (m/s^2)
-        
         #with tqdm.tqdm(total=max_iterations, desc="Calculating top speed") as pbar:
         for iteration in range(max_iterations):
             # Calculate resistive forces
@@ -946,10 +941,6 @@ class Track:
         """
         if abs(radius) < 1e-6:  # Nearly straight line
             return self.calculate_theoretical_top_speed(vehicle)
-
-        # Define these constants if not already in the global scope
-        g = 9.81     # gravity (m/s^2)
-        rho = 1.225  # air density (kg/m^3)
         
         # Get static loads
         mass_front = vehicle.car["mass"] * vehicle.car["cg_position"] / vehicle.car["wheelbase"]
@@ -1280,53 +1271,81 @@ class LapSimulator:
         lap_distance = 0
         target_idx = 1
         
-       	#Calculate track length for progress tracking
-		track_length = self.track.calculate_track_length()
-
-		# Initialize lap distance and progress bar
-		lap_distance = 0
-		from tqdm import tqdm
-		progress_bar = tqdm(total=int(track_length), desc="Lap Progress", unit="m")
-
-		# Continue until we complete a lap
-		while lap_distance < track_length:
-		    target_point = points[target_idx]
-		    target_speed = target_speeds[target_idx]
-		    
-		    # Calculate distance to target point
-		    dist_to_target = cp.sqrt(
-		        (self.vehicle.position[0] - target_point[0])**2 +
-		        (self.vehicle.position[1] - target_point[1])**2
-		    )
-		    
-		    # Find optimal controls for this segment
-		    controls = self.optimize_segment_controls(target_point, target_speed, dist_to_target)
-		    
-		    # Simulate segment with optimal controls
-		    segment_states, segment_distance = self.simulate_segment(controls, dist_to_target, target_point)
-		    
-		    # Update lap distance and progress bar
-		    previous_lap_distance = lap_distance
-		    lap_distance += segment_distance
-		    progress_bar.update(int(lap_distance - previous_lap_distance))
-		    
-		    # Store results
-		    for state in segment_states:
-		        self.time.append(current_time)
-		        self.position_x.append(float(state['position'][0]))
-		        self.position_y.append(float(state['position'][1]))
-		        self.velocity.append(float(state['velocity']))
-		        self.steering.append(state['steering'])
-		        self.throttle.append(state['throttle'])
-		        self.brake.append(state['brake']))
-		        current_time += self.dt
-		    
-		    # Move to next target point
-		    target_idx = (target_idx + 1) % len(points)
-
-		# Close the progress bar when done
-		progress_bar.close()
-         
+        # Calculate track length for progress tracking
+        track_length = self.track.calculate_track_length()
+        # Initialize lap distance and progress bar
+        lap_distance = 0
+        progress_bar = tqdm(total=int(track_length), desc="Lap Progress", unit="m")
+        
+        # Continue until we complete a lap
+        while lap_distance < track_length:
+            target_point = points[target_idx]
+            target_speed = target_speeds[target_idx]
+            
+            # Calculate distance to target point
+            dist_to_target = cp.sqrt(
+                (self.vehicle.position[0] - target_point[0])**2 +
+                (self.vehicle.position[1] - target_point[1])**2
+            )
+            
+            # Find optimal controls for this segment
+            controls = self.optimize_segment_controls(target_point, target_speed, dist_to_target)
+            
+            # Simulate segment with optimal controls
+            segment_states, segment_distance = self.simulate_segment(controls, dist_to_target, target_point)
+            
+            # Update lap distance and progress bar
+            previous_lap_distance = lap_distance
+            lap_distance += segment_distance
+            progress_bar.update(int(lap_distance - previous_lap_distance))
+            
+            # Calculate actual time for each state based on distance and velocity
+            prev_pos = self.vehicle.position
+            prev_time = current_time
+            
+            for state in segment_states:
+                # Get current position and velocity from state
+                current_pos = state['position']
+                current_vel = state['velocity']
+                
+                if current_vel > 0:  # Avoid division by zero
+                    # Calculate distance between previous and current positions
+                    step_distance = cp.sqrt(
+                        (current_pos[0] - prev_pos[0])**2 + 
+                        (current_pos[1] - prev_pos[1])**2
+                    )
+                    
+                    # Calculate time based on average velocity
+                    # Use average velocity between previous and current states for better accuracy
+                    avg_velocity = (self.velocity[-1] if self.velocity else 0 + current_vel) / 2
+                    if avg_velocity > 0:  # Avoid division by zero
+                        step_time = step_distance / avg_velocity
+                    else:
+                        step_time = self.dt  # Fallback to dt if velocity is zero
+                    
+                    current_time += step_time
+                else:
+                    # If velocity is zero, use acceleration model or fallback to dt
+                    current_time += self.dt
+                
+                # Store results
+                self.time.append(current_time)
+                self.position_x.append(float(current_pos[0]))
+                self.position_y.append(float(current_pos[1]))
+                self.velocity.append(float(current_vel))
+                self.steering.append(state['steering'])
+                self.throttle.append(state['throttle'])
+                self.brake.append(state['brake'])
+                
+                # Update previous position for next iteration
+                prev_pos = current_pos
+            
+            # Move to next target point
+            target_idx = (target_idx + 1) % len(points)
+        
+        # Close the progress bar when done
+        progress_bar.close()
+        
         return current_time  # Total lap time
     
     def optimize_segment_controls(self, target_point, target_speed, dist_to_target):
@@ -1556,4 +1575,4 @@ lap_time = simulator.simulate_optimal_lap()
 print(f"Optimal lap time: {lap_time:.2f} seconds")
 
 # Visualize results
-simulator.plot_results() 
+simulator.plot_results()    
