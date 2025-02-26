@@ -440,222 +440,226 @@ class LoadTransfer:
 
 
 class VehicleDynamics:
-    def __init__(self, car_data, track):
-        self.car = car_data
-        self.track = track  # Store the track object
-        self.tire_model = TireModel()
-        self.load_transfer = LoadTransfer()
-        
-        # Initialize state variables
-        self.velocity = 0  # m/s
-        self.velocity_lateral = 0  # m/s
-        self.position = cp.array([0, 0])  # x, y coordinates
-        self.heading = 0  # radians
-        self.yaw_rate = 0  # rad/s
+	def __init__(self, car_data, track):
+		self.car = car_data
+		self.track = track  # Store the track object
+		self.tire_model = TireModel()
+		self.load_transfer = LoadTransfer()
+		
+		# Initialize state variables
+		self.velocity = 0  # m/s
+		self.velocity_lateral = 0  # m/s
+		self.position = cp.array([0, 0])  # x, y coordinates
+		self.heading = 0  # radians
+		self.yaw_rate = 0  # rad/s
 
-    def calculate_slip_angles(self, steer_angle):
-        """
-        Calculate slip angles for all four wheels.
-        """
-        if abs(self.velocity) < 0.1:  # Prevent division by zero at very low speeds
-            return [0, 0, 0, 0]
-        
-        # Distance from CG to front and rear axles
-        a = self.car["cg_position"]  # Distance from front axle to CG
-        b = self.car["wheelbase"] - a  # Distance from CG to rear axle
-        
-        # Calculate slip angles for front and rear
-        front_slip = cp.arctan2(
-            (self.velocity_lateral + self.yaw_rate * a),
-            abs(self.velocity)
-        ) - steer_angle
-        
-        rear_slip = cp.arctan2(
-            (self.velocity_lateral - self.yaw_rate * b),
-            abs(self.velocity)
-        )
-        
-        return [front_slip, front_slip, rear_slip, rear_slip]
+	def calculate_slip_angles(self, steer_angle):
+		"""
+		Calculate slip angles for all four wheels.
+		"""
+		if abs(self.velocity) < 0.1:  # Prevent division by zero at very low speeds
+			return [0, 0, 0, 0]
+		
+		# Distance from CG to front and rear axles
+		a = self.car["cg_position"]  # Distance from front axle to CG
+		b = self.car["wheelbase"] - a  # Distance from CG to rear axle
+		
+		# Calculate slip angles for front and rear
+		front_slip = cp.arctan2(
+			(self.velocity_lateral + self.yaw_rate * a),
+			abs(self.velocity)
+		) - steer_angle
+		
+		rear_slip = cp.arctan2(
+			(self.velocity_lateral - self.yaw_rate * b),
+			abs(self.velocity)
+		)
+		
+		return [front_slip, front_slip, rear_slip, rear_slip]
 
-    def calculate_aerodynamic_drag(self, velocity):
-        """
-        Calculate aerodynamic drag force.
-        """
-        return 0.5 * self.car["drag_coefficient"] * self.car["frontal_area"] * rho * velocity**2
+	def calculate_aerodynamic_drag(self, velocity):
+		"""
+		Calculate aerodynamic drag force.
+		"""
+		return 0.5 * self.car["drag_coefficient"] * self.car["frontal_area"] * rho * velocity**2
 
-    def apply_friction_ellipse(self, Fx, Fy, Fz, mu_x, mu_y):
-        """
-        Apply friction ellipse model to combine longitudinal and lateral forces.
-        """
-        Fx_max = mu_x * Fz
-        Fy_max = mu_y * Fz
-        
-        if (Fx / Fx_max)**2 + (Fy / Fy_max)**2 <= 1:
-            return Fx, Fy
-        
-        scaling = cp.sqrt((Fx / Fx_max)**2 + (Fy / Fy_max)**2)
-        return Fx / scaling, Fy / scaling
-    def apply_friction_ellipse_parallel(self, Fx_requested, Fy_requested, loads, mu_x, mu_y):
-        """Vectorized version of friction ellipse calculation"""
-        # Calculate the normalized forces
-        fx_norm = Fx_requested / (loads * mu_x)
-        fy_norm = Fy_requested / (loads * mu_y)
-        
-        # Calculate the combined normalized force magnitude
-        f_norm_magnitude = cp.sqrt(fx_norm**2 + fy_norm**2)
-        
-        # Find where the combined force exceeds the friction ellipse
-        exceeds_limit = f_norm_magnitude > 1.0
-        
-        # Create scaling factors (1.0 for within limits, less than 1.0 for beyond)
-        scaling = cp.ones_like(f_norm_magnitude)
-        scaling[exceeds_limit] = 1.0 / f_norm_magnitude[exceeds_limit]
-        
-        # Apply scaling to get actual forces
-        Fx_actual = Fx_requested * scaling
-        Fy_actual = Fy_requested * scaling
-        
-        # Return combined forces as a 2D array
-        return cp.column_stack((Fx_actual, Fy_actual))
-    def calculate_forces(self, throttle, brake, steer_angle):
-	    # Start with static loads
-	    loads = [self.load_transfer.Fz_static[0] / 2, 
-	             self.load_transfer.Fz_static[0] / 2,
-	             self.load_transfer.Fz_static[1] / 2, 
-	             self.load_transfer.Fz_static[1] / 2]
-	    
-	    # Initial camber angles
-	    gamma = [self.car["gamma_front"], self.car["gamma_front"],
-	             self.car["gamma_rear"], self.car["gamma_rear"]]
-	    
-	    # Calculate slip angles
-	    slip_angles = self.calculate_slip_angles(steer_angle)
-	    
-	    # Add speed-dependent grip reduction
-	    speed_grip_factor = max(1.0 - (self.velocity / 45.0) * 0.2, 0.8)
-	    
-	    # Prepare calculations that can be done once outside the loop
-	    rolling_resistance = self.car["rolling_resistance_coeff"] * self.car["mass"] * g
-	    drag_force = self.calculate_aerodynamic_drag(self.velocity)
-	    total_resistance = rolling_resistance + drag_force
-	    
-	    # Engine force calculation with power curve
-	    engine_force = throttle * self.car["engine_torque"] * self.car["drivetrain_efficiency"] / self.car["wheel_radius"]
-	    power_factor = max(1.0 - (self.velocity / 30.0) ** 2, 0.1)
-	    engine_force *= power_factor
-	    
-	    brake_force = brake * self.car["brake_torque"] / self.car["wheel_radius"]
-	    
-	    # Fixed components of force distribution
-	    resistance_per_wheel = total_resistance / 4
-	    front_brake = -brake_force / 2 - resistance_per_wheel
-	    rear_force_base = engine_force / 2 - brake_force / 2 - resistance_per_wheel
-	    
-	    # Base Fx requested values (will be updated in parallel)
-	    Fx_requested = [front_brake, front_brake, rear_force_base, rear_force_base]
-	    
-	    # Iterative solution
-	    for _ in cp.range(3):
-	        # Parallel computation of max tire forces
-	        max_lat_long = cp.array(
-	            self.tire_model.calculate_parallel(cp.array(loads), cp.array(gamma))
-	        )
-	        max_lateral = max_lat_long[0] * speed_grip_factor
-	        max_longitudinal = max_lat_long[1] * speed_grip_factor
-	        
-	        # Calculate lateral forces based on slip angles (vectorized)
-	        slip_params = cp.column_stack((loads, slip_angles, gamma))
-	        Fy_requested = self.tire_model.TireCornering.pacejka_formula_vectorized(
-	            slip_params, *self.tire_model.TireCornering.a
-	        )
-	        
-	        # Apply friction ellipse to each wheel (parallel)
-	        mu_x = max_longitudinal / cp.array(loads)
-	        mu_y = max_lateral / cp.array(loads)
-	        combined_forces = self.apply_friction_ellipse_parallel(
-	            cp.array(Fx_requested), Fy_requested, cp.array(loads), mu_x, mu_y
-	        )
-	        
-	        # Extract Fx and Fy components
-	        Fx = combined_forces[:, 0]
-	        Fy = combined_forces[:, 1]
-	        
-	        # Calculate totals
-	        Fx_total = cp.sum(Fx)
-	        Fy_total = cp.sum(Fy)
-	        
-	        # Update loads and camber due to weight transfer
-	        delta_loads, delta_gamma = self.load_transfer.simulate(Fx_total, Fy_total)
-	        
-	        # Update loads and gamma (vectorized)
-	        loads = cp.array([
-	            self.load_transfer.Fz_static[0] / 2 + delta_loads[0],
-	            self.load_transfer.Fz_static[0] / 2 + delta_loads[1],
-	            self.load_transfer.Fz_static[1] / 2 + delta_loads[2],
-	            self.load_transfer.Fz_static[1] / 2 + delta_loads[3]
-	        ])
-	        
-	        gamma = cp.array([
-	            self.car["gamma_front"] + delta_gamma[0],
-	            self.car["gamma_front"] + delta_gamma[1],
-	            self.car["gamma_rear"] + delta_gamma[2],
-	            self.car["gamma_rear"] + delta_gamma[3]
-	        ])
-	    
-	    return float(Fx_total), float(Fy_total)
-	def _update_vehicle_state(self, vehicle_state, Fx, Fy, dt):
-	    """Helper method to update vehicle state in parallel processing"""
-	    # Extract current state
-	    position = vehicle_state['position']
-	    velocity = vehicle_state['velocity']
-	    heading = vehicle_state['heading']
-	    
-	    # Calculate acceleration (simplified from vehicle.update_state)
-	    mass = self.vehicle.car["mass"]
-	    accel_x = Fx / mass
-	    accel_y = Fy / mass
-	    
-	    # Update velocity (magnitude)
-	    velocity += accel_x * dt
-	    
-	    # Update heading based on lateral forces
-	    yaw_rate = Fy * self.vehicle.car["wheelbase"] / (mass * velocity) if velocity > 0.1 else 0
-	    heading += yaw_rate * dt
-	    
-	    # Update position
-	    position[0] += velocity * cp.cos(heading) * dt
-	    position[1] += velocity * cp.sin(heading) * dt
-	    
-	    # Update the state dictionary
-	    vehicle_state['position'] = position
-	    vehicle_state['velocity'] = velocity
-	    vehicle_state['heading'] = heading
-    def update_state(self, Fx, Fy, dt):
-        # Calculate accelerations
-        ax = Fx / self.car["mass"]
-        ay = Fy / self.car["mass"]
-        
-        # Update velocities in body frame
-        self.velocity += ax * dt
-        self.velocity_lateral += ay * dt
-        
-        # Enforce maximum speed based on curvature
-        nearest_point = self.track.get_nearest_point(self.position[0], self.position[1])
-        max_speed = self.track.calculate_max_speed(1 / (nearest_point["curvature"]+1e-25) , self)
-        self.velocity = min(self.velocity, max_speed)
-        
-        # Update yaw rate and heading
-        moment_arm = self.car["wheelbase"] / 2
-        yaw_moment = Fy * moment_arm
-        I_zz = self.car["mass"] * (self.car["wheelbase"]**2 + self.car["track_width"]**2) / 12
-        self.yaw_rate += (yaw_moment / I_zz) * dt
-        self.heading += self.yaw_rate * dt
-        
-        # Update position
-        velocity_global_x = self.velocity * cp.cos(self.heading) - self.velocity_lateral * cp.sin(self.heading)
-        velocity_global_y = self.velocity * cp.sin(self.heading) + self.velocity_lateral * cp.cos(self.heading)
-        self.position[0] += velocity_global_x * dt
-        self.position[1] += velocity_global_y * dt
+	def apply_friction_ellipse(self, Fx, Fy, Fz, mu_x, mu_y):
+		"""
+		Apply friction ellipse model to combine longitudinal and lateral forces.
+		"""
+		Fx_max = mu_x * Fz
+		Fy_max = mu_y * Fz
+		
+		if (Fx / Fx_max)**2 + (Fy / Fy_max)**2 <= 1:
+			return Fx, Fy
+		
+		scaling = cp.sqrt((Fx / Fx_max)**2 + (Fy / Fy_max)**2)
+		return Fx / scaling, Fy / scaling
+
+	def apply_friction_ellipse_parallel(self, Fx_requested, Fy_requested, loads, mu_x, mu_y):
+		"""Vectorized version of friction ellipse calculation"""
+		# Calculate the normalized forces
+		fx_norm = Fx_requested / (loads * mu_x)
+		fy_norm = Fy_requested / (loads * mu_y)
+		
+		# Calculate the combined normalized force magnitude
+		f_norm_magnitude = cp.sqrt(fx_norm**2 + fy_norm**2)
+		
+		# Find where the combined force exceeds the friction ellipse
+		exceeds_limit = f_norm_magnitude > 1.0
+		
+		# Create scaling factors (1.0 for within limits, less than 1.0 for beyond)
+		scaling = cp.ones_like(f_norm_magnitude)
+		scaling[exceeds_limit] = 1.0 / f_norm_magnitude[exceeds_limit]
+		
+		# Apply scaling to get actual forces
+		Fx_actual = Fx_requested * scaling
+		Fy_actual = Fy_requested * scaling
+		
+		# Return combined forces as a 2D array
+		return cp.column_stack((Fx_actual, Fy_actual))
+
+	def calculate_forces(self, throttle, brake, steer_angle):
+		# Start with static loads
+		loads = [self.load_transfer.Fz_static[0] / 2, 
+			 self.load_transfer.Fz_static[0] / 2,
+			 self.load_transfer.Fz_static[1] / 2, 
+			 self.load_transfer.Fz_static[1] / 2]
+		
+		# Initial camber angles
+		gamma = [self.car["gamma_front"], self.car["gamma_front"],
+			 self.car["gamma_rear"], self.car["gamma_rear"]]
+		
+		# Calculate slip angles
+		slip_angles = self.calculate_slip_angles(steer_angle)
+		
+		# Add speed-dependent grip reduction
+		speed_grip_factor = max(1.0 - (self.velocity / 45.0) * 0.2, 0.8)
+		
+		# Prepare calculations that can be done once outside the loop
+		rolling_resistance = self.car["rolling_resistance_coeff"] * self.car["mass"] * g
+		drag_force = self.calculate_aerodynamic_drag(self.velocity)
+		total_resistance = rolling_resistance + drag_force
+		
+		# Engine force calculation with power curve
+		engine_force = throttle * self.car["engine_torque"] * self.car["drivetrain_efficiency"] / self.car["wheel_radius"]
+		power_factor = max(1.0 - (self.velocity / 30.0) ** 2, 0.1)
+		engine_force *= power_factor
+		
+		brake_force = brake * self.car["brake_torque"] / self.car["wheel_radius"]
+		
+		# Fixed components of force distribution
+		resistance_per_wheel = total_resistance / 4
+		front_brake = -brake_force / 2 - resistance_per_wheel
+		rear_force_base = engine_force / 2 - brake_force / 2 - resistance_per_wheel
+		
+		# Base Fx requested values (will be updated in parallel)
+		Fx_requested = [front_brake, front_brake, rear_force_base, rear_force_base]
+		
+		# Iterative solution
+		for _ in cp.range(3):
+			# Parallel computation of max tire forces
+			max_lat_long = cp.array(
+				self.tire_model.calculate_parallel(cp.array(loads), cp.array(gamma))
+			)
+			max_lateral = max_lat_long[0] * speed_grip_factor
+			max_longitudinal = max_lat_long[1] * speed_grip_factor
+			
+			# Calculate lateral forces based on slip angles (vectorized)
+			slip_params = cp.column_stack((loads, slip_angles, gamma))
+			Fy_requested = self.tire_model.TireCornering.pacejka_formula_vectorized(
+				slip_params, *self.tire_model.TireCornering.a
+			)
+			
+			# Apply friction ellipse to each wheel (parallel)
+			mu_x = max_longitudinal / cp.array(loads)
+			mu_y = max_lateral / cp.array(loads)
+			combined_forces = self.apply_friction_ellipse_parallel(
+				cp.array(Fx_requested), Fy_requested, cp.array(loads), mu_x, mu_y
+			)
+			
+			# Extract Fx and Fy components
+			Fx = combined_forces[:, 0]
+			Fy = combined_forces[:, 1]
+			
+			# Calculate totals
+			Fx_total = cp.sum(Fx)
+			Fy_total = cp.sum(Fy)
+			
+			# Update loads and camber due to weight transfer
+			delta_loads, delta_gamma = self.load_transfer.simulate(Fx_total, Fy_total)
+			
+			# Update loads and gamma (vectorized)
+			loads = cp.array([
+				self.load_transfer.Fz_static[0] / 2 + delta_loads[0],
+				self.load_transfer.Fz_static[0] / 2 + delta_loads[1],
+				self.load_transfer.Fz_static[1] / 2 + delta_loads[2],
+				self.load_transfer.Fz_static[1] / 2 + delta_loads[3]
+			])
+			
+			gamma = cp.array([
+				self.car["gamma_front"] + delta_gamma[0],
+				self.car["gamma_front"] + delta_gamma[1],
+				self.car["gamma_rear"] + delta_gamma[2],
+				self.car["gamma_rear"] + delta_gamma[3]
+			])
+		
+		return float(Fx_total), float(Fy_total)
+
+	def update_vehicle_state(self, vehicle_state, Fx, Fy, dt):
+		"""Helper method to update vehicle state in parallel processing"""
+		# Extract current state
+		position = vehicle_state['position']
+		velocity = vehicle_state['velocity']
+		heading = vehicle_state['heading']
+		
+		# Calculate acceleration (simplified from vehicle.update_state)
+		mass = self.vehicle.car["mass"]
+		accel_x = Fx / mass
+		accel_y = Fy / mass
+		
+		# Update velocity (magnitude)
+		velocity += accel_x * dt
+		
+		# Update heading based on lateral forces
+		yaw_rate = Fy * self.vehicle.car["wheelbase"] / (mass * velocity) if velocity > 0.1 else 0
+		heading += yaw_rate * dt
+		
+		# Update position
+		position[0] += velocity * cp.cos(heading) * dt
+		position[1] += velocity * cp.sin(heading) * dt
+		
+		# Update the state dictionary
+		vehicle_state['position'] = position
+		vehicle_state['velocity'] = velocity
+		vehicle_state['heading'] = heading
+
+	def update_state(self, Fx, Fy, dt):
+		# Calculate accelerations
+		ax = Fx / self.car["mass"]
+		ay = Fy / self.car["mass"]
+		
+		# Update velocities in body frame
+		self.velocity += ax * dt
+		self.velocity_lateral += ay * dt
+		
+		# Enforce maximum speed based on curvature
+		nearest_point = self.track.get_nearest_point(self.position[0], self.position[1])
+		max_speed = self.track.calculate_max_speed(1 / (nearest_point["curvature"]+1e-25) , self)
+		self.velocity = min(self.velocity, max_speed)
+		
+		# Update yaw rate and heading
+		moment_arm = self.car["wheelbase"] / 2
+		yaw_moment = Fy * moment_arm
+		I_zz = self.car["mass"] * (self.car["wheelbase"]**2 + self.car["track_width"]**2) / 12
+		self.yaw_rate += (yaw_moment / I_zz) * dt
+		self.heading += self.yaw_rate * dt
+		
+		# Update position
+		velocity_global_x = self.velocity * cp.cos(self.heading) - self.velocity_lateral * cp.sin(self.heading)
+		velocity_global_y = self.velocity * cp.sin(self.heading) + self.velocity_lateral * cp.cos(self.heading)
+		self.position[0] += velocity_global_x * dt
+		self.position[1] += velocity_global_y * dt
 
 
 class Track:
@@ -1234,7 +1238,7 @@ class LapSimulator:
     def __init__(self, track, vehicle):
         self.track = track
         self.vehicle = vehicle
-        self.dt = 0.01  # simulation timestep
+        self.dt = 0.1  # simulation timestep
         
     def simulate_optimal_lap(self):
         """
@@ -1275,7 +1279,7 @@ class LapSimulator:
         track_length = self.track.calculate_track_length()
         # Initialize lap distance and progress bar
         lap_distance = 0
-        progress_bar = tqdm(total=int(track_length), desc="Lap Progress", unit="m")
+        progress_bar = tqdm.tqdm(total=int(track_length), desc="Lap Progress", unit="m")
         
         # Continue until we complete a lap
         while lap_distance < track_length:
