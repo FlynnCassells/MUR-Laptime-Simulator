@@ -5,6 +5,7 @@ from scipy.optimize import curve_fit, minimize, OptimizeWarning
 import pandas as pd
 import matplotlib.pyplot as plt
 import warnings
+import concurrent.futures
 warnings.simplefilter("ignore", OptimizeWarning)
 warnings.simplefilter("ignore", DeprecationWarning)
 '''
@@ -52,13 +53,6 @@ car_data = {
     "gamma_rear": -0.1,            # Camber in the rear (deg)
 }
 
-import os
-import pandas as pd
-import numpy as np
-import cupy as cp
-from scipy.optimize import minimize
-from scipy.optimize import curve_fit
-import matplotlib.pyplot as plt
 
 class TireCornering:
     def __init__(self, run):
@@ -1048,7 +1042,6 @@ class Track:
             
         import concurrent.futures
         
-        # Create a single progress bar for the entire process
         with tqdm.tqdm(total=3, desc="Calculating racing line") as pbar:
             # Create equally spaced points along centerline
             indices = cp.linspace(0, len(self.centerline_x)-1, num_points, dtype=int)
@@ -1287,41 +1280,52 @@ class LapSimulator:
         lap_distance = 0
         target_idx = 1
         
-        # Calculate track length for progress tracking
-        track_length = self.track.calculate_track_length()
-        
-        
-        # Continue until we complete a lap
-        while lap_distance < track_length:
-            target_point = points[target_idx]
-            target_speed = target_speeds[target_idx]
-            
-            # Calculate distance to target point
-            dist_to_target = cp.sqrt(
-                (self.vehicle.position[0] - target_point[0])**2 +
-                (self.vehicle.position[1] - target_point[1])**2
-            )
-            
-            # Find optimal controls for this segment
-            controls = self.optimize_segment_controls(target_point, target_speed, dist_to_target)
-            
-            # Simulate segment with optimal controls
-            segment_states, segment_distance = self.simulate_segment(controls, dist_to_target, target_point)
-            
-            
-            # Store results
-            for state in segment_states:
-                self.time.append(current_time)
-                self.position_x.append(float(state['position'][0]))
-                self.position_y.append(float(state['position'][1]))
-                self.velocity.append(float(state['velocity']))
-                self.steering.append(state['steering'])
-                self.throttle.append(state['throttle'])
-                self.brake.append(state['brake'])
-                current_time += self.dt
-            
-            # Move to next target point
-            target_idx = (target_idx + 1) % len(points)
+       	#Calculate track length for progress tracking
+		track_length = self.track.calculate_track_length()
+
+		# Initialize lap distance and progress bar
+		lap_distance = 0
+		from tqdm import tqdm
+		progress_bar = tqdm(total=int(track_length), desc="Lap Progress", unit="m")
+
+		# Continue until we complete a lap
+		while lap_distance < track_length:
+		    target_point = points[target_idx]
+		    target_speed = target_speeds[target_idx]
+		    
+		    # Calculate distance to target point
+		    dist_to_target = cp.sqrt(
+		        (self.vehicle.position[0] - target_point[0])**2 +
+		        (self.vehicle.position[1] - target_point[1])**2
+		    )
+		    
+		    # Find optimal controls for this segment
+		    controls = self.optimize_segment_controls(target_point, target_speed, dist_to_target)
+		    
+		    # Simulate segment with optimal controls
+		    segment_states, segment_distance = self.simulate_segment(controls, dist_to_target, target_point)
+		    
+		    # Update lap distance and progress bar
+		    previous_lap_distance = lap_distance
+		    lap_distance += segment_distance
+		    progress_bar.update(int(lap_distance - previous_lap_distance))
+		    
+		    # Store results
+		    for state in segment_states:
+		        self.time.append(current_time)
+		        self.position_x.append(float(state['position'][0]))
+		        self.position_y.append(float(state['position'][1]))
+		        self.velocity.append(float(state['velocity']))
+		        self.steering.append(state['steering'])
+		        self.throttle.append(state['throttle'])
+		        self.brake.append(state['brake']))
+		        current_time += self.dt
+		    
+		    # Move to next target point
+		    target_idx = (target_idx + 1) % len(points)
+
+		# Close the progress bar when done
+		progress_bar.close()
          
         return current_time  # Total lap time
     
