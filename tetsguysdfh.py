@@ -111,6 +111,24 @@ class TireCornering:
         V = a11*Fz+a12+(a13*Fz+a14)*gamma*Fz
         Bx1 = B*(alpha+H)
         return D*cp.sin(C*cp.arctan(Bx1-E*(Bx1-cp.arctan(Bx1)))) + V
+    def pacejka_formula_vectorized(self, X, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17):
+        # Unpack the input array
+        Fz, alpha, gamma = X[:, 0], X[:, 1], X[:, 2]
+
+        # Compute Pacejka parameters
+        C = a0
+        D = Fz * (a1 * Fz + a2) * (1 - a15 * gamma**2)
+        BCD = a3 * cp.sin(cp.arctan(2 * Fz / a4)) * (1 - a5 * cp.abs(gamma))
+        B = BCD / (C * D)
+        H = a8 * Fz + a9 + a10 * gamma
+        E = (a6 * Fz + a7) * (1 - (a16 * gamma + a17) * cp.sign(alpha + H))
+        V = a11 * Fz + a12 + (a13 * Fz + a14) * gamma * Fz
+
+        # Compute slip function
+        Bx1 = B * (alpha + H)
+        Fy = D * cp.sin(C * cp.arctan(Bx1 - E * (Bx1 - cp.arctan(Bx1)))) + V
+
+        return Fy
 
     def fit_Fy(self): #Find params for given data
         #intial Guesses
@@ -389,6 +407,43 @@ class TireModel:
             self.TireDrive.calculate_maximum(loads[3])
         ]
         return max_lateral, max_longitudinal
+    def calculate_parallel(self, loads, gamma):
+        """
+        Calculate maximum lateral and longitudinal forces for all tires in parallel using CuPy arrays.
+        
+        Parameters:
+        - loads: CuPy array of tire loads
+        - gamma: CuPy array of camber angles
+        
+        Returns:
+        - Tuple of (max_lateral, max_longitudinal) as CuPy arrays
+        """
+        
+        # Get number of tires from the input arrays
+        num_tires = len(loads)
+        
+        # Initialize arrays for results
+        max_lateral = cp.zeros(num_tires, dtype=cp.float32)
+        max_longitudinal = cp.zeros(num_tires, dtype=cp.float32)
+        
+        # Process front tires (indices 0 and 1)
+        if num_tires > 0:
+            front_indices = cp.arange(min(2, num_tires))
+            for i in front_indices:
+                idx = int(i.get())  # Convert CuPy scalar to Python int
+                max_lateral[idx] = self.TireCornering.calculate_maximum_steer(float(loads[idx].get()), float(gamma[idx].get()))
+                max_longitudinal[idx] = self.TireDrive.calculate_maximum(float(loads[idx].get()))
+        
+        # Process rear tires (indices 2 and 3)
+        if num_tires > 2:
+            rear_indices = cp.arange(2, num_tires)
+            for i in rear_indices:
+                idx = int(i.get())  # Convert CuPy scalar to Python int
+                max_lateral[idx] = self.TireCornering.calculate_maximum_rear(float(loads[idx].get()), car_data["toe_angle"], float(gamma[idx].get()))
+                max_longitudinal[idx] = self.TireDrive.calculate_maximum(float(loads[idx].get()))
+        
+        return max_lateral, max_longitudinal
+
 class LoadTransfer:
     def __init__(self):
         self.mass = car_data["mass"]
@@ -557,7 +612,7 @@ class VehicleDynamics:
 		Fx_requested = [front_brake, front_brake, rear_force_base, rear_force_base]
 		
 		# Iterative solution
-		for _ in cp.range(3):
+		for _ in range(3):
 			# Parallel computation of max tire forces
 			max_lat_long = cp.array(
 				self.tire_model.calculate_parallel(cp.array(loads), cp.array(gamma))
@@ -566,7 +621,11 @@ class VehicleDynamics:
 			max_longitudinal = max_lat_long[1] * speed_grip_factor
 			
 			# Calculate lateral forces based on slip angles (vectorized)
-			slip_params = cp.column_stack((loads, slip_angles, gamma))
+			loads_cp = cp.asarray(loads)
+			slip_angles_cp = cp.asarray(slip_angles)
+			gamma_cp = cp.asarray(gamma)
+
+			slip_params = cp.column_stack((loads_cp, slip_angles_cp, gamma_cp))
 			Fy_requested = self.tire_model.TireCornering.pacejka_formula_vectorized(
 				slip_params, *self.tire_model.TireCornering.a
 			)
@@ -802,16 +861,21 @@ class Track:
     
     def save_racing_line_to_csv(self):
         """Save racing line data to CSV file"""
+
         try:
             if self.racing_line_x is None or self.racing_line_y is None or self.racing_line_speed is None:
                 print("No racing line data to save")
                 return False
-                
-            # Convert CuPy arrays to NumPy for saving
+            
+            x_data = self.racing_line_x.get()
+            y_data = self.racing_line_y.get()
+            speed_data = self.racing_line_speed
+            speed_data = [item.item() for item in speed_data]
+
             racing_line_data = {
-                'racing_line_x': cp.asnumpy(self.racing_line_x),
-                'racing_line_y': cp.asnumpy(self.racing_line_y),
-                'racing_line_speed': self.racing_line_speed  # This might already be a Python list
+                'racing_line_x': x_data,
+                'racing_line_y': y_data,
+                'racing_line_speed': speed_data 
             }
             
             # Create DataFrame and save to CSV
@@ -1021,7 +1085,7 @@ class Track:
 
         return v_low
     
-    def calculate_racing_line(self, vehicle, num_points=50, use_cache=True):
+    def calculate_racing_line(self, vehicle, num_points=100, use_cache=True):
         """
         Calculate optimal racing line using optimization with multithreading
         
@@ -1033,7 +1097,7 @@ class Track:
         # Check if racing line data exists in cache and use it if requested
         if use_cache and self.load_racing_line_from_csv():
             print("Using cached racing line data")
-            return
+            return True
             
         import concurrent.futures
         
@@ -1184,7 +1248,6 @@ class Track:
             # Pad speeds to match number of points
             self.racing_line_speed = [self.racing_line_speed[0]] + self.racing_line_speed + [self.racing_line_speed[-1]]
             pbar.update(1)  # Update progress (3/3 complete)
-            
             # Save racing line to CSV for future use
             self.save_racing_line_to_csv()
     
@@ -1560,15 +1623,12 @@ class LapSimulator:
 
 # Create track and vehicle
 track = Track(scale=100, track_name="figure8", load_from_cache=True)
-print("track data generated")
 track_length = track.calculate_track_length()
 print(f"Track length: {track_length:.2f} meters")
 
 
-
 vehicle = VehicleDynamics(car_data, track)  # Pass the track object
-print("vehicle model generated")
-
+track.calculate_racing_line(vehicle)
 
 # Create simulator
 simulator = LapSimulator(track, vehicle)
