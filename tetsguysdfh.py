@@ -29,29 +29,29 @@ rho = 1.225
 
 # Vehicle parameters
 car_data = {
-    "mass": 370,                   # Mass of the car (kg)
-    "engine_torque": 100,          # Motor torque (Nm)
-    "max_motor_rpm": 6000,         # Maximum motor RPM
-    "wheel_radius": 0.25,          # Wheel radius (m)
+    "mass": 340,                   # Mass of the car (kg)
+    "engine_torque": 150,          # Motor torque (Nm)
+    "max_motor_rpm": 7000,         # Maximum motor RPM
+    "wheel_radius": 0.2032,          # Wheel radius (m)
     "drag_coefficient": 0.9,       # Drag coefficient
-    "frontal_area": 1.5,           # Frontal area (m^2)
+    "frontal_area": 0.8,           # Frontal area (m^2)
     "rolling_resistance_coeff": 0.015,
     "brake_torque": 200,           # Brake torque (Nm)
-    "drivetrain_efficiency": 0.95, # Drivetrain efficiency
-    "wheelbase": 5,              # Wheelbase (m)
-    "track_width": 3,            # Track width (m)
+    "drivetrain_efficiency": 0.90, # Drivetrain efficiency
+    "wheelbase": 1.6125,              # Wheelbase (m)
+    "track_width": 1.29,            # Track width (m)
     "cg_height": 0.3,              # CG height (m)
     "cg_position": 0.75,           # CG position from front axle (m)
     "roll_centre": 0.75,           # Roll Centre Position from front axle (m)
     "toe_angle": 0,                # Toe Angle (deg)
     "down_force": 0.8,               # Coefficient of downforce
-    "roll_stiffness_front": 25000, # Roll Stiffness for front (Nm/deg)
-    "roll_stiffness_rear": 20000,  # Roll Stiffness for rear (Nm/deg)
-    "chassis_torsional_stiff": 40000,
+    "roll_stiffness_front": 420, # Roll Stiffness for front (Nm/deg)
+    "roll_stiffness_rear": 560,  # Roll Stiffness for rear (Nm/deg)
+    "chassis_torsional_stiff": 1400,
     "camber_gain": 0.1,
-    "suspension_stiffness": 45,    # Suspension stiffness (N/m)
-    "gamma_front": -0.1,           # Camber in the front (deg)
-    "gamma_rear": -0.1,            # Camber in the rear (deg)
+    "suspension_stiffness": 40,    # Suspension stiffness (N/m)
+    "gamma_front": -1,           # Camber in the front (deg)
+    "gamma_rear": -1,            # Camber in the rear (deg)
     "brake_balance" : 0.6          # Ratio of brake force front to rear
 }
 
@@ -382,8 +382,8 @@ class TireDrive:
 class TireModel:
     def __init__(self):
         #chosen tire data sets --- LATER SET THESE UP WITH SOME KIND OF LOOKUP TABLE OR SMT
-        self.cnr_run = 4
-        self.drv_run = 69
+        self.cnr_run = 7
+        self.drv_run = 73
         self.TireCornering = TireCornering(self.cnr_run)
         self.TireDrive = TireDrive(self.drv_run)
         
@@ -704,8 +704,8 @@ class VehicleDynamics:
 class Track:
     def __init__(self, scale=100, track_name="figure8", load_from_cache=False):
         self.scale = scale
-        self.track_width = 10  # meters
-        self.resolution = 10  # points to define track
+        self.track_width = 3  # meters
+        self.resolution = 100  # points to define track
         self.track_name = track_name
         
         # CSV filenames for caching
@@ -861,8 +861,9 @@ class Track:
             
             # Create DataFrame and save to CSV
             df = pd.DataFrame(racing_line_data)
-            df.to_csv(self.racing_line_csv, index=False)
-            print(f"Saved racing line data to {self.racing_line_csv}")
+            filename = str(self.vehicle.car["wheelbase"]) + "_" + self.racing_line_csv
+            df.to_csv(filename, index=False)
+            print(f"Saved racing line data to {filename}")
             return True
         except Exception as e:
             print(f"Error saving racing line data: {e}")
@@ -1229,7 +1230,7 @@ class Track:
             self.save_racing_line_to_csv()
             
             print(f"Optimized racing line - estimated lap time: {best_lap_time:.3f}s")
-            return True
+            return best_lap_time
 
     def apply_racing_driver_model(self, speeds, curvatures, look_ahead=5, brake_factor=0.15, accel_factor=0.10):
         """
@@ -2238,7 +2239,7 @@ class Track:
         plt.show()
 '''
 
-class LapSimulator:
+'''class LapSimulator:
     def __init__(self, track, vehicle):
         self.track = track
         self.vehicle = vehicle
@@ -2501,22 +2502,209 @@ class LapSimulator:
         ax4.grid(True)
         
         plt.tight_layout()
+        plt.show()'''
+
+
+class LapSimulator:
+    def __init__(self, track, vehicle):
+        self.track = track
+        self.vehicle = vehicle
+        self.dt = 0.1  # simulation timestep
+        
+    def simulate_optimal_lap(self):
+        """
+        Find optimal lap time using a kinematic model following the racing line
+        """
+        # Ensure racing line exists
+        if not hasattr(self.track, 'racing_line_x') or self.track.racing_line_x is None:
+            self.track.calculate_racing_line(self.vehicle)
+        
+        # Get racing line points and target speeds
+        points = list(zip(self.track.racing_line_x, self.track.racing_line_y))
+        target_speeds = self.track.racing_line_speed
+        
+        # Initialize arrays to store results
+        self.time = [0.0]
+        self.position_x = [points[0][0]]
+        self.position_y = [points[0][1]]
+        self.velocity = [0.1]  # Start with very small non-zero velocity
+        self.steering = [0.0]
+        self.throttle = [0.0]
+        self.brake = [0.0]
+        
+        # Initialize vehicle state
+        self.vehicle.position = np.array([points[0][0], points[0][1]])
+        self.vehicle.velocity = 0.1
+        self.vehicle.heading = np.arctan2(
+            points[1][1] - points[0][1], 
+            points[1][0] - points[0][0]
+        )
+        
+        # Calculate track length for progress tracking
+        track_length = self.track.calculate_track_length()
+        
+        # Simulation loop
+        current_time = 0
+        current_idx = 0
+        lap_distance = 0
+        
+        with tqdm(total=int(track_length), desc="Simulating lap") as pbar:
+            while lap_distance < track_length:
+                # Determine look-ahead point (next target)
+                look_ahead_idx = (current_idx + 1) % len(points)
+                target_point = points[look_ahead_idx]
+                target_speed = target_speeds[look_ahead_idx]
+                
+                # Calculate optimal controls for this segment
+                throttle, brake, steering = self.calculate_optimal_controls(target_point, target_speed)
+                
+                # Apply controls and update vehicle state
+                Fx, Fy = self.vehicle.calculate_forces(throttle, brake, steering)
+                prev_position = self.vehicle.position.copy()
+                self.vehicle.update_state(Fx, Fy, self.dt)
+                
+                # Calculate distance traveled in this step
+                step_distance = np.linalg.norm(self.vehicle.position - prev_position)
+                lap_distance += step_distance
+                current_time += self.dt
+                
+                # Update progress bar 
+                if int(lap_distance) > pbar.n:
+                    pbar.update(int(lap_distance) - pbar.n)
+                
+                # Store results
+                self.time.append(current_time)
+                self.position_x.append(float(self.vehicle.position[0]))
+                self.position_y.append(float(self.vehicle.position[1]))
+                self.velocity.append(float(self.vehicle.velocity))
+                self.steering.append(float(steering))
+                self.throttle.append(float(throttle))
+                self.brake.append(float(brake))
+                
+                # Check if we've reached the current target point
+                dist_to_current_target = np.linalg.norm(
+                    self.vehicle.position - np.array(target_point)
+                )
+                
+                # If we're close to the target point, update the target index
+                if dist_to_current_target < 2.0:  # Within 2 meters
+                    current_idx = look_ahead_idx
+        
+        return current_time  # Total lap time
+    
+    def calculate_optimal_controls(self, target_point, target_speed):
+        """
+        Calculate optimal controls to reach the target point at target speed
+        """
+        # Convert target point to numpy array
+        target = np.array(target_point)
+        
+        # Calculate vector from current position to target
+        heading_vector = target - self.vehicle.position
+        
+        # Calculate desired heading angle
+        desired_heading = np.arctan2(heading_vector[1], heading_vector[0])
+        
+        # Calculate heading error (angle difference)
+        heading_error = self.normalize_angle(desired_heading - self.vehicle.heading)
+        
+        # Calculate steering based on heading error
+        # Simple proportional control for steering
+        steering = np.clip(0.5 * heading_error, -0.5, 0.5)
+        
+        # Calculate speed error
+        speed_error = target_speed - self.vehicle.velocity
+        
+        # Determine throttle and brake based on speed error
+        if speed_error > 0:  # Need to accelerate
+            throttle = np.clip(0.5 * speed_error / target_speed, 0, 1)
+            brake = 0
+        else:  # Need to brake
+            throttle = 0
+            brake = np.clip(-0.5 * speed_error / target_speed, 0, 1)
+            
+        return throttle, brake, steering
+    
+    def normalize_angle(self, angle):
+        """Normalize angle to be between -pi and pi"""
+        while angle > np.pi:
+            angle -= 2 * np.pi
+        while angle < -np.pi:
+            angle += 2 * np.pi
+        return angle
+    
+    def plot_results(self):
+        """
+        Visualize simulation results
+        """
+        # Create subplots
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Plot track and vehicle path
+        self.track.plot_track(show_racing_line=True, ax=ax1)
+        ax1.plot(self.position_x, self.position_y, 'g-', label='Simulated Path')
+        ax1.set_title('Track and Vehicle Path')
+        ax1.legend()
+        
+        # Plot velocity profile
+        ax2.plot(self.time, self.velocity)
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('Velocity (m/s)')
+        ax2.set_title('Velocity Profile')
+        ax2.grid(True)
+        
+        # Plot control inputs
+        ax3.plot(self.time, self.throttle, 'g-', label='Throttle')
+        ax3.plot(self.time, self.brake, 'r-', label='Brake')
+        ax3.set_xlabel('Time (s)')
+        ax3.set_ylabel('Control Input')
+        ax3.set_title('Throttle and Brake Inputs')
+        ax3.legend()
+        ax3.grid(True)
+        
+        # Plot steering input
+        ax4.plot(self.time, self.steering, 'b-')
+        ax4.set_xlabel('Time (s)')
+        ax4.set_ylabel('Steering Angle (rad)')
+        ax4.set_title('Steering Input')
+        ax4.grid(True)
+        
+        plt.tight_layout()
         plt.show()
 
 
 
 
+
+
+
 # Create track and vehicle
-track = Track(scale=100, track_name="figure8", load_from_cache=True)
+track = Track(scale=50, track_name="figure8", load_from_cache=False)
 track_length = track.calculate_track_length()
 print(f"Track length: {track_length:.2f} meters")
+vehicle = VehicleDynamics(car_data, track)
+'''
+#Set Range of Trackwidths to test
+front_stiffness = np.linspace(140, 700, 5)
+rear_stiffness = np.linspace(140, 700, 5)
+times = []
+stiffs = []
+for fs in front_stiffness:
+    car_data["roll_stiffness_front"] = fs
+    for rs in rear_stiffness:
+        car_data["roll_stiffness_rear"] = rs
+        vehicle = VehicleDynamics(car_data, track)  # Pass the track object
+        times.append(track.calculate_racing_line(vehicle))
+        stiffs.append(str(fs)+" , " +str(rs))
+laptimes = {
+    "Roll Rates" : stiffs,
+    "Laptimes" : times
+}
+df = pd.DataFrame(laptimes)
+df.to_csv("laptimes.csv", index=False)
+print("saved laptimes")
 
-
-vehicle = VehicleDynamics(car_data, track)  # Pass the track object
-track.calculate_racing_line(vehicle)
-
-track.plot_track()
-plt.show()
+'''
 
 # Create simulator
 simulator = LapSimulator(track, vehicle)
@@ -2527,4 +2715,4 @@ lap_time = simulator.simulate_optimal_lap()
 print(f"Optimal lap time: {lap_time:.2f} seconds")
 
 # Visualize results
-simulator.plot_results()    
+simulator.plot_results()
